@@ -17,22 +17,18 @@ Set an environment variable `ACCOUNT_ID` to the value of your AWS account id.
 Create a role policy document that allows the actions "eks:Describe*" and "ssm:GetParameters". You can do this by setting an environment variable with the role policy:
 
 ```
-  TRUST="{ \"Version\": \"2012-10-17\", \"Statement\": [ { \"Effect\": \"Allow\", \"Principal\": { \"AWS\": \"arn:aws:iam::${ACCOUNT_ID}:root\" }, \"Action\": \"sts:AssumeRole\" } ] }"
+TRUST="{ \"Version\": \"2012-10-17\", \"Statement\": [ { \"Effect\": \"Allow\", \"Principal\": { \"AWS\": \"arn:aws:iam::${ACCOUNT_ID}:root\" }, \"Action\": \"sts:AssumeRole\" } ] }"
 ```
-Create a role named 'UdacityFlaskDeployCBKubectlRole' using the role policy document:
+Create a role named 'UdacityFlaskDeployCBKubectlRole' using the role policy document (and attach all policies):
 
 ```
-  aws iam create-role --role-name UdacityFlaskDeployCBKubectlRole --assume-role-policy-document "$TRUST" --output text --query 'Role.Arn'
-```
-Create a role policy document that also allows the actions "eks:Describe*" and "ssm:GetParameters". You can create the document in your tmp directory:
+aws iam create-role --role-name UdacityFlaskDeployCBKubectlRole --assume-role-policy-document "$TRUST" --output text --query 'Role.Arn'
 
-```
-  echo '{ "Version": "2012-10-17", "Statement": [ { "Effect": "Allow", "Action": [ "eks:Describe*", "ssm:GetParameters" ], "Resource": "*" } ] }' > /tmp/iam-role-policy 
-```
-Attach the policy to the 'UdacityFlaskDeployCBKubectlRole'. You can do this using awscli:
+aws iam put-role-policy --role-name UdacityFlaskDeployCBKubectlRole --policy-name eks-describe --policy-document file:///tmp/iam-role-policy
 
-```
-  aws iam put-role-policy --role-name UdacityFlaskDeployCBKubectlRole --policy-name eks-describe --policy-document file:///tmp/iam-role-policy
+aws iam attach-role-policy --role-name UdacityFlaskDeployCBKubectlRole --policy-arn arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+
+aws iam attach-role-policy --role-name UdacityFlaskDeployCBKubectlRole --policy-arn arn:aws:iam::aws:policy/AWSCodeBuildAdminAccess
 ```
 
 You have now created a role named 'UdacityFlaskDeployCBKubectlRole'
@@ -41,21 +37,41 @@ You have now created a role named 'UdacityFlaskDeployCBKubectlRole'
 
 Get the current configmap and save it to a file:
 ```
-  kubectl get -n kube-system configmap/aws-auth -o yaml > /tmp/aws-auth-patch.yml
+kubectl get -n kube-system configmap/aws-auth -o yaml | awk "/mapRoles: \|/{print;print \"$ROLE\";next}1" > /tmp/aws-auth-patch.yml
 ```
-In the data/mapRoles section of this document add, replacing `<ACCOUNT_ID>` with your account id:
+This saves the config map to a temporary file located at ```/tmp/aws-auth-patch.yml```.
 
+Check that file and make sure it’s all correct. Should look similar to the file below. Make sure your account id is filled out (don't copy/paste this example, your instance role node should not have the same name as mine does below, your node will have it's own unique name/id):
 ```
-  - rolearn: arn:aws:iam::<ACCOUNT_ID>:role/UdacityFlaskDeployCBKubectlRole
-    username: build
-    groups:
-      - system:masters
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aws-auth
+  namespace: kube-system
+data:
+  mapRoles: |
+    - rolearn:  arn:aws:iam::{YOUR ACCOUNT ID HERE}:role/devel-worker-nodes-NodeInstanceRole-14W1I3VCZQHU7
+      username: system:node:{{EC2PrivateDNSName}}
+      groups:
+        - system:bootstrappers
+        - system:nodes
+    - rolearn: arn:aws:iam::{YOUR ACCOUNT ID HERE}:role/UdacityFlaskDeployCBKubectlRole
+      username: build
+      groups:
+        - system:masters
 ```
 Now update your cluster's configmap:
 
 ```
   kubectl patch configmap/aws-auth -n kube-system --patch "$(cat /tmp/aws-auth-patch.yml)"
 ```
+
+OR
+
+```
+kubectl apply -f /tmp/aws-auth-patch.yaml
+```
+
 ## Create the Pipeline
 
 You will now create a pipeline which watches your Github. When changes are checked in, it will build a new image and deploy it to your cluster.
